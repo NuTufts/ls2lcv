@@ -43,7 +43,6 @@ art_make( EXCLUDE LLMetaMaker_service.cc
 		   ROOT::Gdml
 
           MODULE_LIBRARIES
-		   ls2lcv_sbnd_LArCVMaker
                    lardataalg_DetectorInfo
 		   larcorealg_Geometry
 		   larcore_Geometry_Geometry_service
@@ -86,4 +85,4 @@ art_make( EXCLUDE LLMetaMaker_service.cc
 # install_headers()
 #install_fhicl()
 #install_source()
-#add_subdirectory(fcl)
+add_subdirectory(fcl)

@@ -1,7 +1,7 @@
 ////////////////////////////////////////////////////////////////////////
-// Class:       LiteScanner
+// Class:       LArCVMAker
 // Module Type: analyzer
-// File:        LiteScanner_module.cc
+// File:        LArCVMaker_module.cc
 //
 // Generated at Wed Oct 15 18:41:39 2014 by Kazuhiro Terao using artmod
 // from cetpkgsupport v1_07_01.
@@ -73,21 +73,18 @@
 #include "lardataobj/AnalysisBase/BackTrackerMatchingData.h"
 
 // LArLite include
+#include "larlite/Base/GeoTypes.h"
 #include "larlite/DataFormat/storage_manager.h"
 #include "larlite/DataFormat/potsummary.h"
 #include "larlite/DataFormat/simphotons.h"
 #include "larlite/DataFormat/chstatus.h"
 #include "larlite/DataFormat/DataFormatException.h"
+#include "larlite/LArUtil/LArUtilConfig.h"
+#include "larlite/LArUtil/Geometry.h"
 
 // LArCV include
-#include "larcv/DataFormat/IOManager.h"
-
-// Class doing the translation
-#include "ScannerAlgo.h"
-#include "ScannerAlgo.template.h"
-
-//#include "LLMetaMaker.h"
-
+#include "larcv/core/DataFormat/IOManager.h"
+#include "larcv/core/DataFormat/EventImage2D.h"
 
 // std 
 #include <vector>
@@ -130,12 +127,15 @@ private:
   std::string fStreamName;
   /// RawDigitproducer name (if needed) for ChStatus 
   std::string _chstatus_rawdigit_producer;
+  /// Factor with which to downsample the time dimension
+  int _downsample_factor;
 };
 
 
 LArCVMaker::LArCVMaker(fhicl::ParameterSet const & p) 
-  : EDAnalyzer(p)
-  , fAlg()
+  : EDAnalyzer(p),
+    _mgr( larcv::IOManager::kWRITE ),
+    _downsample_factor(1)
  // More initializers here.
 {
   fStreamName = p.get<std::string>("stream");
@@ -151,12 +151,15 @@ LArCVMaker::LArCVMaker(fhicl::ParameterSet const & p)
     TTimeStamp ts;
     fOutFileName = Form("%s_%08d_%06d_%06d.root",tmp_fname.Data(),ts.GetDate(),ts.GetTime(), (int)(ts.GetNanoSec()/1.e3));
   }
-  _mgr.set_out_name(fOutFileName);
+  _mgr.set_out_file(fOutFileName);
+
+  //geometry setup: use larlite until I find out how to use the Geometry Service
+  std::cout << "Load SBND Geometry" << std::endl;
+  larutil::LArUtilConfig::SetDetector( larlite::geo::kSBND );
 
 }
 
 void LArCVMaker::beginJob() {
-  _mgr.set_io_mode(::larlite::storage_manager::kWRITE);
   _mgr.initialize();
 }
 
@@ -164,21 +167,30 @@ void LArCVMaker::endJob() {
   _mgr.finalize();
 }
 
+void LArCVMaker::beginSubRun(art::SubRun const& sr)
+{
+}
+
 void LArCVMaker::analyze(art::Event const & e)
 {
-  fAlg.EventClear();
+
   _mgr.set_id(e.id().run(),
 	      e.id().subRun(),
 	      e.id().event());
+
+  auto llgeom = larlite::larutil::Geometry::GetME();
   
   const int nCryos = llgeom->Ncryostats();
   int nTPCs   = 0;
   int nPlanes = 0;
+  unsigned int max_wires_per_plane = 0;
   for (int icryo=0; icryo<nCryos; icryo++) {
     for ( int itpc=0; itpc<(int)llgeom->NTPCs(icryo); itpc++ ) {
       nTPCs++;
       for (int iplane=0; iplane<(int)llgeom->Nplanes(itpc,icryo); iplane++) {
 	nPlanes++;
+	if ( llgeom->Nwires(iplane,itpc,icryo)>max_wires_per_plane )
+	  max_wires_per_plane = llgeom->Nwires(iplane,itpc,icryo);
       }
       std::cout << "Cryo[" << icryo << "] TPC[" << itpc << "] nplanes=" << llgeom->Nplanes(itpc,icryo) << std::endl;
     }
@@ -186,6 +198,7 @@ void LArCVMaker::analyze(art::Event const & e)
   std::cout << "Total number of cryostats: " << nCryos << std::endl;
   std::cout << "Total number of TPCs: " << nTPCs << std::endl;
   std::cout << "Total number of Planes: " << nPlanes << std::endl;
+  std::cout << "Max wires per plane: " << max_wires_per_plane << std::endl;  
 
   // ==== LARSOFT PRODUCTS ===============
   // Make a list of larsoft products we want to translate into larlite
@@ -215,9 +228,8 @@ void LArCVMaker::analyze(art::Event const & e)
   // we get the wire data, find longest signal size
   int max_ticks_per_channel = 0;
   for ( auto& wire_tag : wire_tag_v ) {
-    auto pWireVec = event.getValidHandle< std::vector<recob::Wire> >(wire_tag);
-    int nwires = pWireVec->size();
-    
+    auto pWireVec = e.getValidHandle< std::vector<recob::Wire> >(wire_tag);
+    //int nwires = pWireVec->size();    
     for ( auto const& wire : *pWireVec )  {
       size_t nsignal = wire.Signal().size();
       if ( (int)nsignal>max_ticks_per_channel )
@@ -227,11 +239,11 @@ void LArCVMaker::analyze(art::Event const & e)
   }
   std::cout << "Max ticks per channel: " << max_ticks_per_channel << std::endl;
 	  
-  int output_nticks = max_ticks_per_channel/downsample_factor;
+  int output_nticks = max_ticks_per_channel/_downsample_factor;
   int output_nticks_pre = max_ticks_per_channel;
-  if ( downsample_factor>1 && max_ticks_per_channel%downsample_factor!=0 ) {
+  if ( _downsample_factor>1 && max_ticks_per_channel%_downsample_factor!=0 ) {
     output_nticks += 1;
-    output_nticks_pre = downsample_factor*output_nticks;
+    output_nticks_pre = _downsample_factor*output_nticks;
   }
   std::cout << "Output ticks per channel, fit with downsampler : " << output_nticks << std::endl;
   std::cout << "Output ticks per channel, pre-downsampler : " << output_nticks_pre << std::endl;
@@ -256,34 +268,31 @@ void LArCVMaker::analyze(art::Event const & e)
   // populate the images
   for ( auto& wire_tag : wire_tag_v ) {
 
-    auto pWireVec = event.getValidHandle< std::vector<recob::Wire> >(wire_tag);
-    int nwires = pWireVec->size();
+    auto pWireVec = e.getValidHandle< std::vector<recob::Wire> >(wire_tag);
+    //size_t nwires = pWireVec->size();
     
     for ( auto const& wire : *pWireVec )  {
       std::vector<float>  signal = wire.Signal();
-      raw::ChannelID_t   channel = wire.Channel();
-      std::vector<geo::WireID> wire_v = geom->ChannelToWire(channel);
-      
       if ( signal.size()==0 )
 	continue;
 
-      // get plane
-      if ( wire_v.size()>0 ) {
-	auto const& wireid = wire_v.at(0);
-	int wid     = wireid.Wire;
-	int planeid = wireid.parentID().Plane;
-	int tpcid  = wireid.parentID().parentID().TPC;
-	int cryoid = wireid.parentID().parentID().parentID().Cryostat;
-	int lcvplaneid = llgeom->GetSimplePlaneIndexFromCTP( cryoid, tpcid, planeid );
+      raw::ChannelID_t   channel = wire.Channel();
+      larlite::geo::WireID wireid = llgeom->ChannelToWireID(channel);
+
+      int wid     = wireid.Wire;
+      int planeid = wireid.Plane;
+      int tpcid  = wireid.TPC;
+      int cryoid = wireid.Cryostat;
+      int lcvplaneid = llgeom->GetSimplePlaneIndexFromCTP( cryoid, tpcid, planeid );
 	
-	//std::cout << "  wire (p,t,c)=(" << planeid << "," << tpcid << "," << cryoid << ")" << std::endl;
-	auto& img = adc_v.at(lcvplaneid);
-	//if ( signal.size()>max_ticks_per_channel ) {
-	//std::cout << "CH " << channel << ": num wires=" << wire_v.size() << " num ticks=" << signal.size() << std::endl;
-	//}
-	img.copy( 0, wid, signal, std::min((int)signal.size(),(int)output_nticks_pre) );
-	//std::cout << "CH " << channel << ": no wires=" << wire_v.size() << std::endl;
-      }
+      //std::cout << "  wire (p,t,c)=(" << planeid << "," << tpcid << "," << cryoid << ")" << std::endl;
+      auto& img = adc_v.at(lcvplaneid);
+      //if ( signal.size()>max_ticks_per_channel ) {
+      //std::cout << "CH " << channel << ": num wires=" << wire_v.size() << " num ticks=" << signal.size() << std::endl;
+      //}
+      img.copy( 0, wid, signal, std::min((int)signal.size(),(int)output_nticks_pre) );
+      //std::cout << "CH " << channel << ": no wires=" << wire_v.size() << std::endl;
+      
       //std::cout << "max signal size: " << nmaxsignal << std::endl;
     }//end of loop over wire-vector
   }//end of wire-tag loop
@@ -291,7 +300,7 @@ void LArCVMaker::analyze(art::Event const & e)
   for (auto& img : adc_v ) {
     
     // compress image first
-    if ( downsample_factor>1  )
+    if ( _downsample_factor>1  )
       img.compress( output_nticks, max_wires_per_plane, larcv::Image2D::kSum );
     
     int nabove = 0;
@@ -309,9 +318,9 @@ void LArCVMaker::analyze(art::Event const & e)
       ev_wireout->Emplace( std::move(img) );
     }
   }
-      
+  
   _mgr.save_entry();
-
+  
 }
 
 DEFINE_ART_MODULE(LArCVMaker)

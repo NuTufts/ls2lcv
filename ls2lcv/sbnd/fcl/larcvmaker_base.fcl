@@ -1,0 +1,15 @@
+BEGIN_PROLOG
+larcvmaker_base:
+{
+  # module name
+  module_type:       "LArCVMaker"
+  # output file name
+  out_filename:      "out_larcv.root"
+  # boolean to enable "unique" filename ... suffix becomes YYYYMMDD_HHMMSS_MICROSECONDS.root
+  unique_filename: false
+  # stream
+  stream: "x"
+  # compression factor
+  DownsampleFactor: 4
+}
+END_PROLOG
